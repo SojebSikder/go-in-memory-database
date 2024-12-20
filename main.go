@@ -6,11 +6,13 @@ import (
 	"strings"
 )
 
+var port = "6379"
+
 func main() {
-	fmt.Println("Listening on port :6379")
+	fmt.Println("Listening on port :" + port)
 
 	// Create a new server
-	l, err := net.Listen("tcp", ":6379")
+	l, err := net.Listen("tcp", ":"+port)
 	if err != nil {
 		fmt.Println(err)
 		return
