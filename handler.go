@@ -5,12 +5,16 @@ import (
 )
 
 var Handlers = map[string]func([]Value) Value{
-	"PING":    ping,
-	"SET":     set,
-	"GET":     get,
-	"HSET":    hset,
-	"HGET":    hget,
-	"HGETALL": hgetall,
+	"PING":     ping,
+	"SET":      set,
+	"GET":      get,
+	"HSET":     hset,
+	"HGET":     hget,
+	"HGETALL":  hgetall,
+	"HDEL":     hdel,
+	"HLEN":     hlen,
+	"FLUSHALL": flushall,
+	"DEL":      del,
 }
 
 func ping(args []Value) Value {
@@ -120,4 +124,73 @@ func hgetall(args []Value) Value {
 	}
 
 	return Value{typ: "array", array: values}
+}
+
+// hdel command which deletes a key-value pair in the hash
+func hdel(args []Value) Value {
+	if len(args) != 2 {
+		return Value{typ: "error", str: "ERR wrong number of arguments for 'hdel' command"}
+	}
+
+	hash := args[0].bulk
+	key := args[1].bulk
+
+	HSETsMu.Lock()
+	delete(HSETs[hash], key)
+	HSETsMu.Unlock()
+
+	return Value{typ: "string", str: "OK"}
+}
+
+// hlen command which returns the number of key-value pairs in the hash
+func hlen(args []Value) Value {
+	if len(args) != 1 {
+		return Value{typ: "error", str: "ERR wrong number of arguments for 'hlen' command"}
+	}
+
+	hash := args[0].bulk
+
+	HSETsMu.RLock()
+	defer HSETsMu.RUnlock()
+
+	hashMap, exists := HSETs[hash]
+	if !exists {
+		return Value{typ: "integer", num: 0} // Return 0 if hash does not exist
+	}
+
+	return Value{typ: "integer", num: len(hashMap)}
+}
+
+// flushall command which clears all the key-value pairs in the SET and the hash
+func flushall(args []Value) Value {
+	// clear all the key-value pairs in the SET
+	SETsMu.Lock()
+	SETs = map[string]string{}
+	SETsMu.Unlock()
+
+	// clear all the key-value pairs in the hash
+	HSETsMu.Lock()
+	HSETs = map[string]map[string]string{}
+	HSETsMu.Unlock()
+
+	return Value{typ: "string", str: "OK"}
+}
+
+// del command which deletes a key-value pair in the SET or the hash
+func del(args []Value) Value {
+	if len(args) != 1 {
+		return Value{typ: "error", str: "ERR wrong number of arguments for 'del' command"}
+	}
+
+	key := args[0].bulk
+
+	SETsMu.Lock()
+	delete(SETs, key)
+	SETsMu.Unlock()
+
+	HSETsMu.Lock()
+	delete(HSETs, key)
+	HSETsMu.Unlock()
+
+	return Value{typ: "string", str: "OK"}
 }

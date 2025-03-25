@@ -31,3 +31,7 @@ set name sojeb
 - HSET
 - HGET
 - HGETALL
+- HDEL
+- HLEN
+- FLUSHALL
+- DEL

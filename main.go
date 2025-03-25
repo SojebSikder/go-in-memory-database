@@ -81,7 +81,8 @@ func main() {
 			continue
 		}
 
-		if command == "SET" || command == "HSET" {
+		// write to aof file if the command does any changes to the database
+		if command == "SET" || command == "HSET" || command == "DEL" || command == "FLUSHALL" || command == "HDEL" {
 			aof.Write(value)
 		}
 
