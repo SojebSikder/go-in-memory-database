@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"net"
 	"strings"
@@ -9,6 +10,9 @@ import (
 var port = "6379"
 
 func main() {
+	flag.StringVar(&port, "port", "6379", "port to listen on")
+	flag.Parse()
+
 	fmt.Println("Listening on port :" + port)
 
 	// Create a new server
