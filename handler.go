@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"sync"
 )
 
@@ -15,6 +16,7 @@ var Handlers = map[string]func([]Value) Value{
 	"HLEN":     hlen,
 	"FLUSHALL": flushall,
 	"DEL":      del,
+	"INFO":     info,
 }
 
 func ping(args []Value) Value {
@@ -193,4 +195,30 @@ func del(args []Value) Value {
 	HSETsMu.Unlock()
 
 	return Value{typ: "string", str: "OK"}
+}
+
+// info command which shows stats about the server
+func info(args []Value) Value {
+	if len(args) != 0 {
+		return Value{typ: "error", str: "ERR wrong number of arguments for 'info' command"}
+	}
+
+	SETsMu.RLock()
+	totalKeys := len(SETs)
+	SETsMu.RUnlock()
+
+	HSETsMu.RLock()
+	totalHashes := len(HSETs)
+	totalFields := 0
+	for _, m := range HSETs {
+		totalFields += len(m)
+	}
+	HSETsMu.RUnlock()
+
+	infoStr := fmt.Sprintf(
+		"# Server Info\nkeys:%d\nhashes:%d\nfields:%d\n",
+		totalKeys, totalHashes, totalFields,
+	)
+
+	return Value{typ: "bulk", bulk: infoStr}
 }

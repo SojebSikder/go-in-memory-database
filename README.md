@@ -35,3 +35,4 @@ set name sojeb
 - HLEN
 - FLUSHALL
 - DEL
+- INFO
