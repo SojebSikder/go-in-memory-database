@@ -5,7 +5,7 @@ platforms=("windows/amd64" "windows/arm64" "linux/amd64" "linux/arm64" "darwin/a
 for platform in "${platforms[@]}"; do
     OS=${platform%/*}
     ARCH=${platform#*/}
-    OUTPUT="smem-${OS}-${ARCH}"
+    OUTPUT="build/tunnel-${OS}-${ARCH}"
 
     # Append .exe for Windows
     if [ "$OS" == "windows" ]; then
@@ -13,7 +13,7 @@ for platform in "${platforms[@]}"; do
     fi
 
     echo "Building for $OS $ARCH..."
-    GOOS=$OS GOARCH=$ARCH go build -o $OUTPUT
+    GOOS=$OS GOARCH=$ARCH go build -o "$OUTPUT" .
 done
 
 echo "Build completed!"

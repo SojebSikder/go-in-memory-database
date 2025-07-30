@@ -1,7 +1,8 @@
-package main
+package internal
 
 import (
 	"fmt"
+	"strconv"
 	"sync"
 )
 
@@ -17,6 +18,8 @@ var Handlers = map[string]func([]Value) Value{
 	"FLUSHALL": flushall,
 	"DEL":      del,
 	"INFO":     info,
+	"INCR":     incr,
+	"DECR":     decr,
 }
 
 func ping(args []Value) Value {
@@ -221,4 +224,58 @@ func info(args []Value) Value {
 	)
 
 	return Value{typ: "bulk", bulk: infoStr}
+}
+
+// incr command which increments the value of a key in the SET
+func incr(args []Value) Value {
+	if len(args) != 1 {
+		return Value{typ: "error", str: "ERR wrong number of arguments for 'incr' command"}
+	}
+
+	key := args[0].bulk
+
+	SETsMu.Lock()
+	value, ok := SETs[key]
+	SETsMu.Unlock()
+
+	if !ok {
+		SETs[key] = "1"
+		return Value{typ: "integer", num: 1}
+	}
+
+	num, err := strconv.Atoi(value)
+	if err != nil {
+		return Value{typ: "error", str: "ERR value is not an integer"}
+	}
+
+	num++
+	SETs[key] = strconv.Itoa(num)
+	return Value{typ: "integer", num: num}
+}
+
+// decr command which decrements the value of a key in the SET
+func decr(args []Value) Value {
+	if len(args) != 1 {
+		return Value{typ: "error", str: "ERR wrong number of arguments for 'decr' command"}
+	}
+
+	key := args[0].bulk
+
+	SETsMu.Lock()
+	value, ok := SETs[key]
+	SETsMu.Unlock()
+
+	if !ok {
+		SETs[key] = "0"
+		return Value{typ: "integer", num: 0}
+	}
+
+	num, err := strconv.Atoi(value)
+	if err != nil {
+		return Value{typ: "error", str: "ERR value is not an integer"}
+	}
+
+	num--
+	SETs[key] = strconv.Itoa(num)
+	return Value{typ: "integer", num: num}
 }

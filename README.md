@@ -36,3 +36,5 @@ set name sojeb
 - FLUSHALL
 - DEL
 - INFO
+- INCR
+- DECR

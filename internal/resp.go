@@ -1,4 +1,4 @@
-package main
+package internal
 
 import (
 	"bufio"
@@ -195,7 +195,6 @@ func (v Value) marshalInteger() []byte {
 }
 
 // Writer
-
 type Writer struct {
 	writer io.Writer
 }
