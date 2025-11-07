@@ -36,7 +36,7 @@ func StartServer() {
 		panic(err)
 	}
 
-	path := filepath.Dir(exePath) + "/database.aof"
+	path := filepath.Join(filepath.Dir(exePath), "database.aof")
 	aof, err := NewAof(path)
 	if err != nil {
 		fmt.Println("Error opening AOF:", err)
