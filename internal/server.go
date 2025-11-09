@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"net"
-	"os"
 	"path/filepath"
 	"strings"
 )
@@ -25,18 +24,18 @@ func StartServer() {
 	}
 	defer listener.Close()
 
-	exePath, err := os.Executable()
-	if err != nil {
-		panic(err)
-	}
-
+	// exePath, err := os.Executable()
+	// if err != nil {
+	// 	panic(err)
+	// }
 	// Resolve symlinks and get absolute directory
-	exePath, err = filepath.EvalSymlinks(exePath)
-	if err != nil {
-		panic(err)
-	}
+	// exePath, err = filepath.EvalSymlinks(exePath)
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// path := filepath.Join(filepath.Dir(exePath), "database.aof")
 
-	path := filepath.Join(filepath.Dir(exePath), "database.aof")
+	path := filepath.Join("database.aof")
 	aof, err := NewAof(path)
 	if err != nil {
 		fmt.Println("Error opening AOF:", err)
@@ -57,6 +56,9 @@ func StartServer() {
 
 		handler(args)
 	})
+
+	// Start the background key expiry cleaner
+	StartKeyExpiryCleaner()
 
 	for {
 		conn, err := listener.Accept()
