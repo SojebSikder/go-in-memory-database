@@ -3,7 +3,9 @@ package internal
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 )
 
 var Handlers = map[string]func([]Value) Value{
@@ -20,6 +22,9 @@ var Handlers = map[string]func([]Value) Value{
 	"INFO":     info,
 	"INCR":     incr,
 	"DECR":     decr,
+	"EXPIRE":   expire,
+	"TTL":      ttl,
+	"PERSIST":  persist,
 }
 
 func ping(args []Value) Value {
@@ -30,20 +35,127 @@ func ping(args []Value) Value {
 	return Value{typ: "string", str: args[0].bulk}
 }
 
-var SETs = map[string]string{}
-var SETsMu = sync.RWMutex{}
+var (
+	SETs   = map[string]string{}
+	SETsMu = sync.RWMutex{}
+
+	// For TTL
+	Expirations   = map[string]int64{}
+	ExpirationsMu = sync.RWMutex{}
+)
+
+func StartKeyExpiryCleaner() {
+	go func() {
+		for {
+			time.Sleep(1 * time.Second)
+			now := time.Now().Unix()
+
+			ExpirationsMu.Lock()
+			for k, exp := range Expirations {
+				if now > exp {
+					// Remove from SETs
+					SETsMu.Lock()
+					delete(SETs, k)
+					SETsMu.Unlock()
+
+					// Remove from HSETs
+					HSETsMu.Lock()
+					delete(HSETs, k)
+					HSETsMu.Unlock()
+
+					// Remove from expirations
+					delete(Expirations, k)
+				}
+			}
+			ExpirationsMu.Unlock()
+		}
+	}()
+}
+
+// checkAndDeleteIfExpired returns true if the key existed but was expired
+func checkAndDeleteIfExpired(key string) (string, bool) {
+	ExpirationsMu.RLock()
+	expireAt, exists := Expirations[key]
+	ExpirationsMu.RUnlock()
+
+	if exists && time.Now().Unix() > expireAt {
+		// Key expired, remove it
+		// Always lock SETs/HSETs first, then Expirations to avoid deadlocks
+		SETsMu.Lock()
+		delete(SETs, key)
+		SETsMu.Unlock()
+
+		HSETsMu.Lock()
+		delete(HSETs, key)
+		HSETsMu.Unlock()
+
+		ExpirationsMu.Lock()
+		delete(Expirations, key)
+		ExpirationsMu.Unlock()
+
+		return "", true
+	}
+
+	// Check in SETs
+	SETsMu.RLock()
+	value, ok := SETs[key]
+	SETsMu.RUnlock()
+	if ok {
+		return value, false
+	}
+
+	// Check in HSETs
+	HSETsMu.RLock()
+	_, ok = HSETs[key]
+	HSETsMu.RUnlock()
+	if ok {
+		return "", false // key exists as a hash, no single string value
+	}
+
+	return "", exists // key does not exist
+}
 
 func set(args []Value) Value {
-	if len(args) != 2 {
+	if len(args) < 2 {
 		return Value{typ: "error", str: "ERR wrong number of arguments for 'set' command"}
 	}
 
 	key := args[0].bulk
 	value := args[1].bulk
 
+	var expireSeconds int64 = 0
+
+	// Check for optional EX argument
+	if len(args) == 4 {
+		option := args[2].bulk
+		if strings.ToLower(option) != "ex" {
+			return Value{typ: "error", str: "ERR syntax error"}
+		}
+
+		secs, err := strconv.ParseInt(args[3].bulk, 10, 64)
+		if err != nil || secs <= 0 {
+			return Value{typ: "error", str: "ERR invalid expire time"}
+		}
+		expireSeconds = secs
+	} else if len(args) != 2 {
+		return Value{typ: "error", str: "ERR syntax error"}
+	}
+
+	// Store value
 	SETsMu.Lock()
 	SETs[key] = value
 	SETsMu.Unlock()
+
+	// Handle expiration if EX is provided
+	if expireSeconds > 0 {
+		ExpirationsMu.Lock()
+		Expirations[key] = time.Now().Unix() + expireSeconds
+		ExpirationsMu.Unlock()
+	} else {
+		ExpirationsMu.Lock()
+		delete(Expirations, key)
+		ExpirationsMu.Unlock()
+	}
 
 	return Value{typ: "string", str: "OK"}
 }
@@ -55,11 +167,9 @@ func get(args []Value) Value {
 
 	key := args[0].bulk
 
-	SETsMu.RLock()
-	value, ok := SETs[key]
-	SETsMu.RUnlock()
-
-	if !ok {
+	// Check expiration
+	value, expired := checkAndDeleteIfExpired(key)
+	if expired {
 		return Value{typ: "null"}
 	}
 
@@ -97,9 +207,14 @@ func hget(args []Value) Value {
 	key := args[1].bulk
 
 	HSETsMu.RLock()
-	value, ok := HSETs[hash][key]
-	HSETsMu.RUnlock()
+	defer HSETsMu.RUnlock()
 
+	hashMap, exists := HSETs[hash]
+	if !exists {
+		return Value{typ: "null"}
+	}
+
+	value, ok := hashMap[key]
 	if !ok {
 		return Value{typ: "null"}
 	}
@@ -115,15 +230,15 @@ func hgetall(args []Value) Value {
 	hash := args[0].bulk
 
 	HSETsMu.RLock()
-	value, ok := HSETs[hash]
-	HSETsMu.RUnlock()
+	defer HSETsMu.RUnlock()
 
-	if !ok {
+	hashMap, exists := HSETs[hash]
+	if !exists {
 		return Value{typ: "null"}
 	}
 
-	values := []Value{}
-	for k, v := range value {
+	values := make([]Value, 0, len(hashMap)*2)
+	for k, v := range hashMap {
 		values = append(values, Value{typ: "bulk", bulk: k})
 		values = append(values, Value{typ: "bulk", bulk: v})
 	}
@@ -141,8 +256,15 @@ func hdel(args []Value) Value {
 	key := args[1].bulk
 
 	HSETsMu.Lock()
-	delete(HSETs[hash], key)
-	HSETsMu.Unlock()
+	defer HSETsMu.Unlock()
+
+	if _, ok := HSETs[hash]; ok {
+		delete(HSETs[hash], key)
+		// delete the hash itself if it becomes empty
+		if len(HSETs[hash]) == 0 {
+			delete(HSETs, hash)
+		}
+	}
 
 	return Value{typ: "string", str: "OK"}
 }
@@ -177,6 +299,11 @@ func flushall(args []Value) Value {
 	HSETsMu.Lock()
 	HSETs = map[string]map[string]string{}
 	HSETsMu.Unlock()
+
+	// clear expirations
+	ExpirationsMu.Lock()
+	Expirations = map[string]int64{}
+	ExpirationsMu.Unlock()
 
 	return Value{typ: "string", str: "OK"}
 }
@@ -235,9 +362,9 @@ func incr(args []Value) Value {
 	key := args[0].bulk
 
 	SETsMu.Lock()
-	value, ok := SETs[key]
-	SETsMu.Unlock()
+	defer SETsMu.Unlock()
 
+	value, ok := SETs[key]
 	if !ok {
 		SETs[key] = "1"
 		return Value{typ: "integer", num: 1}
@@ -262,9 +389,9 @@ func decr(args []Value) Value {
 	key := args[0].bulk
 
 	SETsMu.Lock()
-	value, ok := SETs[key]
-	SETsMu.Unlock()
+	defer SETsMu.Unlock()
 
+	value, ok := SETs[key]
 	if !ok {
 		SETs[key] = "0"
 		return Value{typ: "integer", num: 0}
@@ -278,4 +405,105 @@ func decr(args []Value) Value {
 	num--
 	SETs[key] = strconv.Itoa(num)
 	return Value{typ: "integer", num: num}
+}
+
+// EXPIRE sets a timeout on a key
+func expire(args []Value) Value {
+	if len(args) != 2 {
+		return Value{typ: "error", str: "ERR wrong number of arguments for 'expire' command"}
+	}
+
+	key := args[0].bulk
+	seconds, err := strconv.ParseInt(args[1].bulk, 10, 64)
+	if err != nil || seconds <= 0 {
+		return Value{typ: "error", str: "ERR invalid expire time"}
+	}
+
+	// Check if key exists in either SETs or HSETs
+	SETsMu.RLock()
+	_, existsSET := SETs[key]
+	SETsMu.RUnlock()
+
+	HSETsMu.RLock()
+	_, existsHSET := HSETs[key]
+	HSETsMu.RUnlock()
+
+	if !existsSET && !existsHSET {
+		return Value{typ: "integer", num: 0} // Key does not exist
+	}
+
+	ExpirationsMu.Lock()
+	Expirations[key] = time.Now().Unix() + seconds
+	ExpirationsMu.Unlock()
+
+	return Value{typ: "integer", num: 1}
+}
+
+// TTL returns the remaining time to live of a key
+func ttl(args []Value) Value {
+	if len(args) != 1 {
+		return Value{typ: "error", str: "ERR wrong number of arguments for 'ttl' command"}
+	}
+
+	key := args[0].bulk
+
+	ExpirationsMu.RLock()
+	expireAt, exists := Expirations[key]
+	ExpirationsMu.RUnlock()
+
+	// Check if key exists in SETs or HSETs
+	SETsMu.RLock()
+	_, existsSET := SETs[key]
+	SETsMu.RUnlock()
+
+	HSETsMu.RLock()
+	_, existsHSET := HSETs[key]
+	HSETsMu.RUnlock()
+
+	if !existsSET && !existsHSET {
+		return Value{typ: "integer", num: -2} // Key does not exist
+	}
+
+	if !exists {
+		return Value{typ: "integer", num: -1} // Key exists but has no expiration
+	}
+
+	remaining := expireAt - time.Now().Unix()
+	if remaining < 0 {
+		return Value{typ: "integer", num: -2} // Key expired
+	}
+
+	return Value{typ: "integer", num: int(remaining)}
+}
+
+// PERSIST removes the expiration from a key
+func persist(args []Value) Value {
+	if len(args) != 1 {
+		return Value{typ: "error", str: "ERR wrong number of arguments for 'persist' command"}
+	}
+
+	key := args[0].bulk
+
+	// Check if key exists in either SETs or HSETs
+	SETsMu.RLock()
+	_, existsSET := SETs[key]
+	SETsMu.RUnlock()
+
+	HSETsMu.RLock()
+	_, existsHSET := HSETs[key]
+	HSETsMu.RUnlock()
+
+	if !existsSET && !existsHSET {
+		return Value{typ: "integer", num: 0} // Key does not exist
+	}
+
+	ExpirationsMu.Lock()
+	defer ExpirationsMu.Unlock()
+
+	if _, exists := Expirations[key]; !exists {
+		return Value{typ: "integer", num: 0} // Key had no expiration
+	}
+
+	delete(Expirations, key)
+	return Value{typ: "integer", num: 1}
 }

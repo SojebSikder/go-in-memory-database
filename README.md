@@ -27,6 +27,7 @@ set name sojeb
 # Supported commands
 - PING
 - SET
+  - Support EX argument
 - GET
 - HSET
 - HGET
@@ -38,3 +39,7 @@ set name sojeb
 - INFO
 - INCR
 - DECR
+
+- EXPIRE
+- TTL
+- PERSIST
