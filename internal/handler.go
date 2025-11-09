@@ -73,14 +73,13 @@ func StartKeyExpiryCleaner() {
 }
 
 // checkAndDeleteIfExpired returns true if the key existed but was expired
-func checkAndDeleteIfExpired(key string) (string, bool) {
+func checkAndDeleteIfExpired(key string) (*string, bool) {
 	ExpirationsMu.RLock()
 	expireAt, exists := Expirations[key]
 	ExpirationsMu.RUnlock()
 
 	if exists && time.Now().Unix() > expireAt {
 		// Key expired, remove it
-		// Always lock SETs/HSETs first, then Expirations to avoid deadlocks
 		SETsMu.Lock()
 		delete(SETs, key)
 		SETsMu.Unlock()
@@ -93,7 +92,7 @@ func checkAndDeleteIfExpired(key string) (string, bool) {
 		delete(Expirations, key)
 		ExpirationsMu.Unlock()
 
-		return "", true
+		return nil, true
 	}
 
 	// Check in SETs
@@ -101,7 +100,7 @@ func checkAndDeleteIfExpired(key string) (string, bool) {
 	value, ok := SETs[key]
 	SETsMu.RUnlock()
 	if ok {
-		return value, false
+		return &value, false
 	}
 
 	// Check in HSETs
@@ -109,10 +108,10 @@ func checkAndDeleteIfExpired(key string) (string, bool) {
 	_, ok = HSETs[key]
 	HSETsMu.RUnlock()
 	if ok {
-		return "", false // key exists as a hash, no single string value
+		return nil, false // key exists as a hash, no single string value
 	}
 
-	return "", exists // key does not exist
+	return nil, false // key does not exist
 }
 
 func set(args []Value) Value {
@@ -169,11 +168,11 @@ func get(args []Value) Value {
 
 	// Check expiration
 	value, expired := checkAndDeleteIfExpired(key)
-	if expired {
+	if expired || value == nil {
 		return Value{typ: "null"}
 	}
 
-	return Value{typ: "bulk", bulk: value}
+	return Value{typ: "bulk", bulk: *value}
 }
 
 var HSETs = map[string]map[string]string{}
