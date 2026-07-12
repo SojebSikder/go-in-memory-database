@@ -25,6 +25,12 @@ var Handlers = map[string]func([]Value) Value{
 	"EXPIRE":   expire,
 	"TTL":      ttl,
 	"PERSIST":  persist,
+	"SADD":     sadd,
+	// connection handshake
+	"HELLO":   hello,
+	"CLIENT":  clientCmd,
+	"EVALSHA": evalsha,
+	"EVAL":    eval,
 }
 
 func ping(args []Value) Value {
@@ -63,6 +69,11 @@ func StartKeyExpiryCleaner() {
 					delete(HSETs, k)
 					HSETsMu.Unlock()
 
+					// Remove from Sets
+					SetsMu.Lock()
+					delete(Sets, k)
+					SetsMu.Unlock()
+
 					// Remove from expirations
 					delete(Expirations, k)
 				}
@@ -88,6 +99,10 @@ func checkAndDeleteIfExpired(key string) (*string, bool) {
 		delete(HSETs, key)
 		HSETsMu.Unlock()
 
+		SetsMu.Lock()
+		delete(Sets, key)
+		SetsMu.Unlock()
+
 		ExpirationsMu.Lock()
 		delete(Expirations, key)
 		ExpirationsMu.Unlock()
@@ -111,7 +126,58 @@ func checkAndDeleteIfExpired(key string) (*string, bool) {
 		return nil, false // key exists as a hash, no single string value
 	}
 
+	// Check in Sets
+	SetsMu.RLock()
+	_, ok = Sets[key]
+	SetsMu.RUnlock()
+	if ok {
+		return nil, false // key exists as a set, no single string value
+	}
+
 	return nil, false // key does not exist
+}
+
+// hello handles the Redis connection handshake (RESP3 negotiation)
+func hello(args []Value) Value {
+	return Value{
+		typ: "array",
+		array: []Value{
+			{typ: "string", str: "server"}, {typ: "string", str: "smem"},
+			{typ: "string", str: "version"}, {typ: "string", str: "0.1.0"},
+			{typ: "string", str: "proto"}, {typ: "integer", num: 2},
+			{typ: "string", str: "mode"}, {typ: "string", str: "standalone"},
+		},
+	}
+}
+
+// clientCmd handles connection management subcommands like CLIENT SETNAME, CLIENT LIST, etc.
+func clientCmd(args []Value) Value {
+	if len(args) > 0 {
+		subCmd := strings.ToUpper(args[0].bulk)
+
+		if subCmd == "SETNAME" || subCmd == "TRACKING" {
+			return Value{typ: "string", str: "OK"}
+		}
+	}
+	return Value{typ: "string", str: "OK"}
+}
+
+// evalsha handles executing cached Lua scripts.
+// returning an NOSCRIPT error forces the client to fall back to standard EVAL (sending the raw script)
+func evalsha(args []Value) Value {
+	return Value{typ: "error", str: "NOSCRIPT No matching script. Please use EVAL."}
+}
+
+// eval stub that returns an empty array or null to satisfy basic script checks
+func eval(args []Value) Value {
+	if len(args) < 2 {
+		return Value{typ: "error", str: "ERR wrong number of arguments for 'eval' command"}
+	}
+
+	fmt.Printf("Client attempted to run Lua Script: %s\n", args[0].bulk)
+
+	// return an empty array response
+	return Value{typ: "array", array: []Value{}}
 }
 
 func set(args []Value) Value {
@@ -287,7 +353,37 @@ func hlen(args []Value) Value {
 	return Value{typ: "integer", num: len(hashMap)}
 }
 
-// flushall command which clears all the key-value pairs in the SET and the hash
+var Sets = map[string]map[string]bool{}
+var SetsMu = sync.RWMutex{}
+
+// sadd command adds the specified members to the set stored at key.
+func sadd(args []Value) Value {
+	if len(args) < 2 {
+		return Value{typ: "error", str: "ERR wrong number of arguments for 'sadd' command"}
+	}
+
+	key := args[0].bulk
+
+	SetsMu.Lock()
+	defer SetsMu.Unlock()
+
+	if _, ok := Sets[key]; !ok {
+		Sets[key] = map[string]bool{}
+	}
+
+	addedCount := 0
+	for i := 1; i < len(args); i++ {
+		member := args[i].bulk
+		if !Sets[key][member] {
+			Sets[key][member] = true
+			addedCount++
+		}
+	}
+
+	return Value{typ: "integer", num: addedCount}
+}
+
+// flushall command which clears all the key-value pairs in the SET, the hash, and the sets
 func flushall(args []Value) Value {
 	// clear all the key-value pairs in the SET
 	SETsMu.Lock()
@@ -299,6 +395,11 @@ func flushall(args []Value) Value {
 	HSETs = map[string]map[string]string{}
 	HSETsMu.Unlock()
 
+	// clear all the key-value pairs in the sets
+	SetsMu.Lock()
+	Sets = map[string]map[string]bool{}
+	SetsMu.Unlock()
+
 	// clear expirations
 	ExpirationsMu.Lock()
 	Expirations = map[string]int64{}
@@ -307,7 +408,7 @@ func flushall(args []Value) Value {
 	return Value{typ: "string", str: "OK"}
 }
 
-// del command which deletes a key-value pair in the SET or the hash
+// del command which deletes a key-value pair in the SET, the hash, or the set
 func del(args []Value) Value {
 	if len(args) != 1 {
 		return Value{typ: "error", str: "ERR wrong number of arguments for 'del' command"}
@@ -322,6 +423,10 @@ func del(args []Value) Value {
 	HSETsMu.Lock()
 	delete(HSETs, key)
 	HSETsMu.Unlock()
+
+	SetsMu.Lock()
+	delete(Sets, key)
+	SetsMu.Unlock()
 
 	return Value{typ: "string", str: "OK"}
 }
@@ -344,9 +449,17 @@ func info(args []Value) Value {
 	}
 	HSETsMu.RUnlock()
 
+	SetsMu.RLock()
+	totalSets := len(Sets)
+	totalMembers := 0
+	for _, m := range Sets {
+		totalMembers += len(m)
+	}
+	SetsMu.RUnlock()
+
 	infoStr := fmt.Sprintf(
-		"# Server Info\nkeys:%d\nhashes:%d\nfields:%d\n",
-		totalKeys, totalHashes, totalFields,
+		"# Server Info\nkeys:%d\nhashes:%d\nfields:%d\nsets:%d\nmembers:%d\n",
+		totalKeys, totalHashes, totalFields, totalSets, totalMembers,
 	)
 
 	return Value{typ: "bulk", bulk: infoStr}
@@ -418,7 +531,7 @@ func expire(args []Value) Value {
 		return Value{typ: "error", str: "ERR invalid expire time"}
 	}
 
-	// Check if key exists in either SETs or HSETs
+	// check if key exists in either SETs, HSETs, or Sets
 	SETsMu.RLock()
 	_, existsSET := SETs[key]
 	SETsMu.RUnlock()
@@ -427,7 +540,11 @@ func expire(args []Value) Value {
 	_, existsHSET := HSETs[key]
 	HSETsMu.RUnlock()
 
-	if !existsSET && !existsHSET {
+	SetsMu.RLock()
+	_, existsSet := Sets[key]
+	SetsMu.RUnlock()
+
+	if !existsSET && !existsHSET && !existsSet {
 		return Value{typ: "integer", num: 0} // Key does not exist
 	}
 
@@ -450,7 +567,7 @@ func ttl(args []Value) Value {
 	expireAt, exists := Expirations[key]
 	ExpirationsMu.RUnlock()
 
-	// Check if key exists in SETs or HSETs
+	// Check if key exists in SETs, HSETs, or Sets
 	SETsMu.RLock()
 	_, existsSET := SETs[key]
 	SETsMu.RUnlock()
@@ -459,7 +576,11 @@ func ttl(args []Value) Value {
 	_, existsHSET := HSETs[key]
 	HSETsMu.RUnlock()
 
-	if !existsSET && !existsHSET {
+	SetsMu.RLock()
+	_, existsSet := Sets[key]
+	SetsMu.RUnlock()
+
+	if !existsSET && !existsHSET && !existsSet {
 		return Value{typ: "integer", num: -2} // Key does not exist
 	}
 
@@ -483,7 +604,7 @@ func persist(args []Value) Value {
 
 	key := args[0].bulk
 
-	// Check if key exists in either SETs or HSETs
+	// Check if key exists in either SETs, HSETs, or Sets
 	SETsMu.RLock()
 	_, existsSET := SETs[key]
 	SETsMu.RUnlock()
@@ -492,7 +613,11 @@ func persist(args []Value) Value {
 	_, existsHSET := HSETs[key]
 	HSETsMu.RUnlock()
 
-	if !existsSET && !existsHSET {
+	SetsMu.RLock()
+	_, existsSet := Sets[key]
+	SetsMu.RUnlock()
+
+	if !existsSET && !existsHSET && !existsSet {
 		return Value{typ: "integer", num: 0} // Key does not exist
 	}
 

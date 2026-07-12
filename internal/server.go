@@ -96,12 +96,13 @@ func handleConnection(conn net.Conn, aof *Aof) {
 
 		handler, ok := Handlers[command]
 		if !ok {
-			writer.Write(Value{typ: "string", str: "Unknown command"})
+			fmt.Println("Invalid command:", command)
+			writer.Write(Value{typ: "error", str: "Unknown command"})
 			continue
 		}
 
 		if command == "SET" || command == "HSET" || command == "DEL" || command == "FLUSHALL" ||
-			command == "HDEL" || command == "INCR" || command == "DECR" {
+			command == "HDEL" || command == "INCR" || command == "DECR" || command == "SADD" || command == "SREM" {
 			aof.Write(value)
 		}
 
