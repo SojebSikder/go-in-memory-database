@@ -43,3 +43,10 @@ set name sojeb
 - EXPIRE
 - TTL
 - PERSIST
+
+- SADD
+
+- HELLO
+- CLIENT
+- EVALSHA
+- EVAL (for fallback only, lua not supported yety)
